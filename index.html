@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>TardiTalk</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self';"/>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23C8860A'/><text x='16' y='22' text-anchor='middle' font-family='serif' font-style='italic' font-weight='700' font-size='20' fill='white'>π</text></svg>"/>
+  <link rel="stylesheet" href="style.css"/>
+</head>
+<body>
+<div id="app" class="app" aria-label="TardiTalk">
+  <div id="sidebar" class="sidebar" role="navigation" aria-label="Conversations">
+    <div class="sidebar-header">
+      <div class="app-brand">
+        <div class="pi-icon" aria-hidden="true">π</div>
+        TardiTalk
+      </div>
+      <div class="sidebar-actions">
+        <button id="btn-compose" class="icon-btn" title="New conversation">✎</button>
+        <button id="btn-contacts" class="icon-btn" title="Contacts">☰</button>
+        <button id="btn-settings" class="icon-btn" title="Settings">⚙</button>
+      </div>
+    </div>
+    <div class="search-wrap">
+      <input id="search-input" type="search" placeholder="Search messages…" autocomplete="off" aria-label="Search messages"/>
+    </div>
+    <div class="filter-bar" role="tablist" aria-label="Filter by protocol">
+      <button class="filter-btn active" data-filter="all" role="tab">All</button>
+      <button class="filter-btn" data-filter="wechat" role="tab">WeChat</button>
+      <button class="filter-btn" data-filter="whatsapp" role="tab">WhatsApp</button>
+      <button class="filter-btn" data-filter="signal" role="tab">Signal</button>
+      <button class="filter-btn" data-filter="email" role="tab">Mail</button>
+    </div>
+    <div id="thread-list" class="thread-list" role="list" aria-label="Conversations"></div>
+    <div class="conn-bar">
+      <div id="conn-status-dot" class="conn-dot disconnected"></div>
+      <span id="conn-status-label">Connecting…</span>
+      <div id="platform-health" class="platform-health" style="margin-left:auto"></div>
+    </div>
+  </div>
+  <div class="chat-area" id="chat-area">
+    <!-- Empty state -->
+    <div id="chat-empty" class="chat-empty">
+      <div class="empty-icon">π</div>
+      <p>Select a conversation to start messaging</p>
+    </div>
+    <!-- Active chat -->
+    <div id="chat-active" class="chat-active" style="display:none">
+      <div class="chat-header">
+        <button id="btn-chat-back" class="btn-back" aria-label="Back">‹</button>
+        <div id="chat-avatar" class="avatar" aria-hidden="true"></div>
+        <div class="chat-title">
+          <h2 id="chat-name"></h2>
+          <div id="chat-meta" class="chat-meta"></div>
+        </div>
+        <div id="platform-health-chat" class="platform-health"></div>
+      </div>
+      <div id="message-feed" class="message-feed" role="log" aria-live="polite" aria-label="Messages"></div>
+      <div class="compose-area">
+        <span id="compose-proto-label" class="compose-proto"></span>
+        <textarea id="compose-input" class="compose-input" placeholder="Message" rows="1" aria-label="Compose message"></textarea>
+        <button id="btn-send" class="btn-send" disabled aria-label="Send">➤</button>
+      </div>
+    </div>
+  </div>
+  <div id="overlay" class="panel-overlay" aria-hidden="true"></div>
+  <div id="contacts-panel" class="side-panel" role="dialog" aria-label="Contacts" aria-hidden="true">
+    <div class="panel-header">
+      <h2>Contacts</h2>
+      <button id="btn-contacts-close" class="icon-btn" aria-label="Close">✕</button>
+    </div>
+    <div class="panel-body">
+      <input id="contacts-search" type="search" placeholder="Search contacts…" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:20px;margin-bottom:12px;font-size:.875rem;color:var(--text);background:var(--surface2);outline:none"/>
+      <div id="contact-list" role="list"></div>
+    </div>
+  </div>
+  <div id="settings-panel" class="side-panel" role="dialog" aria-label="Settings" aria-hidden="true">
+    <div class="panel-header">
+      <h2>Settings</h2>
+      <button id="btn-settings-close" class="icon-btn" aria-label="Close">✕</button>
+    </div>
+    <div class="panel-body">
+      <div class="setting-item">
+        <div>
+          <label>Pinned contacts only</label>
+          <small>Only notify for pinned conversations</small>
+        </div>
+        <button class="toggle" id="toggle-pinned-only" aria-pressed="true"></button>
+      </div>
+      <div class="setting-item">
+        <div>
+          <label>Suppress stickers</label>
+          <small>Block sticker notifications</small>
+        </div>
+        <button class="toggle" id="toggle-suppress-stickers" aria-pressed="true"></button>
+      </div>
+      <div class="setting-item">
+        <div>
+          <label>Strip trackers</label>
+          <small>Remove tracking pixels from emails</small>
+        </div>
+        <button class="toggle" id="toggle-strip-trackers" aria-pressed="true"></button>
+      </div>
+      <div class="setting-item">
+        <div>
+          <label>HTML → Markdown</label>
+          <small>Convert HTML emails to plain text</small>
+        </div>
+        <button class="toggle" id="toggle-html-md" aria-pressed="true"></button>
+      </div>
+      <div style="margin-top:20px;padding-top:12px;border-top:1px solid var(--border)">
+        <button id="btn-export" style="background:var(--amber);color:#FFF;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:.875rem">Export Thread Summary</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="app.js"></script>
+<script>
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
+</script>
+</body>
+</html>
