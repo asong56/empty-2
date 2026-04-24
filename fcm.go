@@ -1,4 +1,3 @@
-// fcm.go — Firebase Cloud Messaging Push Dispatcher
 package main
 
 import (
@@ -16,56 +15,56 @@ import (
 )
 
 const (
-	fcmLegacyEndpoint = "https://fcm.googleapis.com/fcm/send"
-	fcmTimeout        = 10 * time.Second
-	fcmMaxRetries     = 3
+	fcmV1EndpointFmt = "https://fcm.googleapis.com/v1/projects/%s/messages:send"
+	fcmTimeout       = 10 * time.Second
+	fcmMaxRetries    = 3
 )
 
-type fcmLegacyPayload struct {
-	To          string            `json:"to"`
-	Priority    string            `json:"priority"`
-	Data        map[string]string `json:"data"`
-	TimeToLive  int               `json:"time_to_live"`
-	CollapseKey string            `json:"collapse_key,omitempty"`
+type fcmV1Message struct {
+	Message fcmV1Inner `json:"message"`
 }
 
-type fcmResponse struct {
-	Success int         `json:"success"`
-	Failure int         `json:"failure"`
-	Results []fcmResult `json:"results"`
-	Error   *fcmError   `json:"error,omitempty"`
+type fcmV1Inner struct {
+	Token   string            `json:"token"`
+	Data    map[string]string `json:"data"`
+	Android *fcmAndroidConfig `json:"android,omitempty"`
 }
 
-type fcmResult struct {
-	MessageID      string `json:"message_id"`
-	RegistrationID string `json:"registration_id"`
-	Error          string `json:"error"`
+type fcmAndroidConfig struct {
+	Priority string `json:"priority"`
+	TTL      string `json:"ttl"`
 }
 
-type fcmError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-	Status  string `json:"status"`
+type fcmV1Response struct {
+	Name string `json:"name"`
+}
+
+type fcmErrorBody struct {
+	Error struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Status  string `json:"status"`
+	} `json:"error"`
 }
 
 type FCMDispatcher struct {
 	db         *sql.DB
-	serverKey  string
 	projectID  string
+	serverKey  string
 	httpClient *http.Client
 }
 
 func NewFCMDispatcher(db *sql.DB) *FCMDispatcher {
-	serverKey := os.Getenv("TARDI_FCM_SERVER_KEY")
 	projectID := os.Getenv("TARDI_FCM_PROJECT_ID")
-	if serverKey == "" && projectID == "" {
-		log.Println("[fcm] FCM push disabled (no credentials)")
+	serverKey := os.Getenv("TARDI_FCM_SERVER_KEY")
+	if projectID == "" || serverKey == "" {
+		log.Println("[fcm] FCM push disabled (TARDI_FCM_PROJECT_ID or TARDI_FCM_SERVER_KEY not set)")
 		return nil
 	}
 	return &FCMDispatcher{
 		db:         db,
-		serverKey:  serverKey,
 		projectID:  projectID,
+		serverKey:  serverKey,
 		httpClient: &http.Client{Timeout: fcmTimeout},
 	}
 }
@@ -117,79 +116,82 @@ func (d *FCMDispatcher) sendWithRetry(token string, data map[string]string) erro
 		if attempt > 0 {
 			time.Sleep(time.Duration(attempt) * 2 * time.Second)
 		}
-		result, err := d.sendOnce(token, data)
-		if err != nil {
+		err := d.sendOnce(token, data)
+		if err == nil {
+			return nil
+		}
+		if strings.Contains(err.Error(), "transient") || strings.Contains(err.Error(), "rate-limited") {
 			lastErr = err
 			continue
 		}
-		if len(result.Results) > 0 {
-			res := result.Results[0]
-			switch res.Error {
-			case "":
-				if res.RegistrationID != "" && res.RegistrationID != token {
-					_ = d.replaceToken(token, res.RegistrationID)
-				}
-				return nil
-			case "NotRegistered", "InvalidRegistration":
-				_ = d.deleteToken(token)
-				return fmt.Errorf("token invalidated (%s)", res.Error)
-			case "Unavailable", "InternalServerError":
-				lastErr = fmt.Errorf("FCM transient: %s", res.Error)
-				continue
-			default:
-				return fmt.Errorf("FCM error: %s", res.Error)
-			}
-		}
-		if result.Error != nil {
-			lastErr = fmt.Errorf("FCM error %d: %s", result.Error.Code, result.Error.Message)
-			if result.Error.Code >= 500 {
-				continue
-			}
-			return lastErr
-		}
-		return nil
+		return err
 	}
 	return lastErr
 }
 
-func (d *FCMDispatcher) sendOnce(token string, data map[string]string) (*fcmResponse, error) {
-	body, err := json.Marshal(fcmLegacyPayload{
-		To: token, Priority: "high", Data: data, TimeToLive: 60,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshal: %w", err)
+func (d *FCMDispatcher) sendOnce(token string, data map[string]string) error {
+	envelope := fcmV1Message{
+		Message: fcmV1Inner{
+			Token: token,
+			Data:  data,
+			Android: &fcmAndroidConfig{
+				Priority: "high",
+				TTL:      "60s",
+			},
+		},
 	}
+	body, err := json.Marshal(envelope)
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+
+	endpoint := fmt.Sprintf(fcmV1EndpointFmt, d.projectID)
 	ctx, cancel := context.WithTimeout(context.Background(), fcmTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fcmLegacyEndpoint, bytes.NewReader(body))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
+		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "key="+d.serverKey)
+	req.Header.Set("Authorization", "Bearer "+d.serverKey)
+
 	resp, err := d.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("http: %w", err)
+		return fmt.Errorf("http: %w", err)
 	}
 	defer resp.Body.Close()
+
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 8192))
 	if err != nil {
-		return nil, fmt.Errorf("response read: %w", err)
+		return fmt.Errorf("response read: %w", err)
 	}
+
+	if resp.StatusCode == http.StatusOK {
+		return nil
+	}
+
 	if resp.StatusCode == http.StatusTooManyRequests {
-		return nil, fmt.Errorf("FCM rate-limited")
+		return fmt.Errorf("FCM rate-limited (transient)")
 	}
 	if resp.StatusCode >= 500 {
-		return nil, fmt.Errorf("FCM server error %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		return fmt.Errorf("FCM server error %d (transient): %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("FCM status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+
+	var errBody fcmErrorBody
+	if jsonErr := json.Unmarshal(respBody, &errBody); jsonErr == nil {
+		switch errBody.Error.Status {
+		case "UNREGISTERED":
+			_ = d.deleteToken(token)
+			return fmt.Errorf("token invalidated (UNREGISTERED)")
+		case "INVALID_ARGUMENT":
+			_ = d.deleteToken(token)
+			return fmt.Errorf("token invalid (INVALID_ARGUMENT)")
+		}
+		return fmt.Errorf("FCM error %d %s: %s", errBody.Error.Code, errBody.Error.Status, errBody.Error.Message)
 	}
-	var result fcmResponse
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, fmt.Errorf("parse response: %w", err)
-	}
-	return &result, nil
+
+	return fmt.Errorf("FCM status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 }
 
 func (d *FCMDispatcher) getAllTokens() ([]string, error) {
@@ -209,21 +211,31 @@ func (d *FCMDispatcher) getAllTokens() ([]string, error) {
 }
 
 func (d *FCMDispatcher) deleteToken(token string) error {
-	_, err := d.db.Exec(`DELETE FROM devices WHERE fcm_token = ?`, token); return err
+	_, err := d.db.Exec(`DELETE FROM devices WHERE fcm_token = ?`, token)
+	return err
 }
+
 func (d *FCMDispatcher) replaceToken(old, canonical string) error {
-	_, err := d.db.Exec(`UPDATE devices SET fcm_token = ?, last_seen = ? WHERE fcm_token = ?`, canonical, time.Now().Unix(), old); return err
+	_, err := d.db.Exec(
+		`UPDATE devices SET fcm_token = ?, last_seen = ? WHERE fcm_token = ?`,
+		canonical, time.Now().Unix(), old,
+	)
+	return err
 }
 
 func (s *GhostServer) HandleDeviceRegister(w http.ResponseWriter, r *http.Request) {
-	if !requirePOST(w, r) { return }
+	if !requirePOST(w, r) {
+		return
+	}
 	var req struct {
 		DeviceID  string `json:"device_id"`
 		ContactID string `json:"contact_id"`
 		FCMToken  string `json:"fcm_token"`
 		Platform  string `json:"platform"`
 	}
-	if !decodeJSON(w, r, &req) { return }
+	if !decodeJSON(w, r, &req) {
+		return
+	}
 	if req.DeviceID == "" || req.FCMToken == "" {
 		http.Error(w, "device_id and fcm_token required", http.StatusBadRequest)
 		return
